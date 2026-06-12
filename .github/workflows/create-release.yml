@@ -1,0 +1,150 @@
+name: Create Release
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - hk1.16.1
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: custom-firmware-release
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    name: Build firmware and publish release
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.merged == true
+
+    steps:
+      - name: Checkout repository with tags and submodules
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          submodules: recursive
+
+      - name: Get release label
+        id: get-label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          COUNT=$(echo "$LABELS" | jq '[.[] | select(.name | test("^release:(major|minor|patch|none)$"))] | length')
+          echo "Release label count: $COUNT"
+
+          if [ "$COUNT" -ne 1 ]; then
+            echo "ERROR: Expected exactly 1 release:* label, found $COUNT. Aborting."
+            exit 1
+          fi
+
+          LABEL=$(echo "$LABELS" | jq -r '[.[] | select(.name | test("^release:(major|minor|patch|none)$"))] | .[0].name')
+          echo "Label: $LABEL"
+          echo "label=$LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if release:none
+        if: steps.get-label.outputs.label == 'release:none'
+        run: echo "Label is release:none. Skipping."
+
+      - name: Calculate next version
+        id: calc-version
+        if: steps.get-label.outputs.label != 'release:none'
+        run: |
+          PX4_BASE="v1.16.1"
+          LABEL="${{ steps.get-label.outputs.label }}"
+
+          LATEST_TAG=$(git tag --list "${PX4_BASE}-[0-9]*.[0-9]*.[0-9]*" \
+            | grep -E "^v1\.16\.1-[0-9]+\.[0-9]+\.[0-9]+$" \
+            | sort -V \
+            | tail -n 1)
+
+          echo "Latest matching tag: '${LATEST_TAG}'"
+
+          if [ -z "$LATEST_TAG" ]; then
+            NEXT_VERSION="0.1.0"
+            echo "No existing tags found. Initial version: $NEXT_VERSION"
+          else
+            CUSTOM_VERSION="${LATEST_TAG#${PX4_BASE}-}"
+            MAJOR=$(echo "$CUSTOM_VERSION" | cut -d. -f1)
+            MINOR=$(echo "$CUSTOM_VERSION" | cut -d. -f2)
+            PATCH=$(echo "$CUSTOM_VERSION" | cut -d. -f3)
+
+            case "$LABEL" in
+              release:major) NEXT_VERSION="$((MAJOR + 1)).0.0" ;;
+              release:minor) NEXT_VERSION="${MAJOR}.$((MINOR + 1)).0" ;;
+              release:patch) NEXT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))" ;;
+            esac
+          fi
+
+          GIT_TAG="${PX4_BASE}-${NEXT_VERSION}"
+          echo "Next version: $NEXT_VERSION  Git tag: $GIT_TAG"
+          echo "next_version=$NEXT_VERSION" >> "$GITHUB_OUTPUT"
+          echo "git_tag=$GIT_TAG"           >> "$GITHUB_OUTPUT"
+
+      - name: Install build dependencies
+        if: steps.get-label.outputs.label != 'release:none'
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive Tools/setup/ubuntu.sh --no-sim-tools
+
+      - name: Build firmware
+        id: build
+        if: steps.get-label.outputs.label != 'release:none'
+        run: |
+          NEXT_VERSION="${{ steps.calc-version.outputs.next_version }}"
+
+          make px4_fmu-v6c_default
+          make px4_fmu-v6x_default
+
+          cp build/px4_fmu-v6c_default/px4_fmu-v6c_default.px4 "px4_fmu-v6c-v${NEXT_VERSION}.px4"
+          cp build/px4_fmu-v6x_default/px4_fmu-v6x_default.px4 "px4_fmu-v6x-v${NEXT_VERSION}.px4"
+
+          echo "v6c_asset=px4_fmu-v6c-v${NEXT_VERSION}.px4" >> "$GITHUB_OUTPUT"
+          echo "v6x_asset=px4_fmu-v6x-v${NEXT_VERSION}.px4" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push git tag
+        if: steps.get-label.outputs.label != 'release:none'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          GIT_TAG="${{ steps.calc-version.outputs.git_tag }}"
+          git tag "$GIT_TAG"
+          git push origin "$GIT_TAG"
+
+      - name: Create GitHub Release
+        if: steps.get-label.outputs.label != 'release:none'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEXT_VERSION="${{ steps.calc-version.outputs.next_version }}"
+          GIT_TAG="${{ steps.calc-version.outputs.git_tag }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          LABEL="${{ steps.get-label.outputs.label }}"
+          V6C_ASSET="${{ steps.build.outputs.v6c_asset }}"
+          V6X_ASSET="${{ steps.build.outputs.v6x_asset }}"
+
+          {
+            echo "Custom Firmware Version: ${NEXT_VERSION}"
+            echo "PX4 Base Version: v1.16.1"
+            echo "Git Tag: ${GIT_TAG}"
+            echo "Source PR: #${PR_NUMBER}"
+            echo "Bump Type: ${LABEL}"
+            echo "Boards:"
+            echo "  - px4_fmu-v6c_default"
+            echo "  - px4_fmu-v6x_default"
+            echo "Artifacts:"
+            echo "  - ${V6C_ASSET}"
+            echo "  - ${V6X_ASSET}"
+            echo "Validation:"
+            echo "  - build: passed"
+            echo "  - bench: not tested"
+            echo "  - flight: not tested"
+          } > release-body.md
+
+          gh release create "$GIT_TAG" \
+            --title "Custom Firmware v${NEXT_VERSION}" \
+            --notes-file release-body.md \
+            "$V6C_ASSET" "$V6X_ASSET"
