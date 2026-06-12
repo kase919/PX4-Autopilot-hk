@@ -1,0 +1,41 @@
+name: Check Release Label
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - labeled
+      - unlabeled
+      - ready_for_review
+    branches:
+      - hk1.16.1
+
+jobs:
+  check-label:
+    name: Verify exactly one release label
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check release label
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels) }}
+        run: |
+          echo "Base branch: ${{ github.event.pull_request.base.ref }}"
+
+          COUNT=$(echo "$LABELS" | jq '[.[] | select(.name | test("^release:(major|minor|patch|none)$"))] | length')
+          echo "Found release:* label count: $COUNT"
+
+          if [ "$COUNT" -eq 0 ]; then
+            echo "NG: No release:* label found. Attach exactly one of: release:major, release:minor, release:patch, release:none"
+            exit 1
+          fi
+
+          if [ "$COUNT" -ge 2 ]; then
+            echo "NG: Multiple release:* labels found ($COUNT). Keep exactly one."
+            exit 1
+          fi
+
+          LABEL_NAME=$(echo "$LABELS" | jq -r '[.[] | select(.name | test("^release:(major|minor|patch|none)$"))] | .[0].name')
+          echo "OK: $LABEL_NAME"
