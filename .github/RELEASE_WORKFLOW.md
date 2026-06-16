@@ -40,12 +40,18 @@ PR を作成したら、以下の `release:*` ラベルを **1つだけ** 付け
   ↓
 バージョン番号を計算（既存タグから自動計算）
   ↓
+git タグをローカルに作成（例: v1.16.1-0.2.1）★ ビルド前に作成
+  ↓
 ファームウェアをビルド（px4_fmu-v6c_default, px4_fmu-v6x_default）
   ↓
-git タグを作成・push（例: v1.16.1-0.2.1）
+git タグを push（ビルド成功後）
   ↓
 GitHub Release を作成し .px4 ファイルを添付
 ```
+
+> **重要: タグはビルドの「前」に作成する**  
+> PX4 はビルド時の `git describe` の結果からファームウェアバージョン（QGC の CustomFwVer）を埋め込みます（`src/lib/version/px_update_git_header.py` → `PX4_GIT_TAG_STR` → `src/lib/version/version.c`）。  
+> タグをビルド後に作成すると、ビルド時点ではタグが存在せず CustomFwVer が `0.0.0` になってしまいます。そのため、**タグをローカルに作成してからビルドし、ビルド成功後に push** する構成にしています。ステップの順序を変更しないでください。
 
 ### 3. バージョン形式
 
